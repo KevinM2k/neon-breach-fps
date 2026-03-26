@@ -351,25 +351,50 @@
                     if (enemy.flash > 0) enemy.flash--;
                     let dx = player.x - enemy.x, dy = player.y - enemy.y;
                     let d = Math.sqrt(dx*dx + dy*dy);
-                    if (!hasLOS(enemy.x, enemy.y, player.x, player.y)) return;
-                    // Chase
-                    if (d > 1.0) {
-                        let spd = 0.006;
-                        let nx = enemy.x + (dx/d) * spd, ny = enemy.y + (dy/d) * spd;
-                        if (map[Math.floor(ny)][Math.floor(enemy.x)] === 0) enemy.y = ny;
-                        if (map[Math.floor(enemy.y)][Math.floor(nx)] === 0) enemy.x = nx;
-                    }
-                    // Shoot — accuracy degrades with distance
-                    enemy.shootTimer--;
-                    if (enemy.shootTimer <= 0) {
-                        let hitChance = Math.max(0.1, 1.0 - d * 0.1); // 100% at 0, ~10% at 9+
-                        if (Math.random() < hitChance) {
-                            let dmg = Math.max(1, 12 - d * 1.2) | 0;
-                            playerHp = Math.max(0, playerHp - dmg);
-                            hpDisplay.textContent = playerHp + '%';
-                            hitFlash = 12;
+                    const canSee = hasLOS(enemy.x, enemy.y, player.x, player.y);
+
+                    if (canSee) {
+                        enemy.losGapTimer = 0;
+                        if (!enemy.spotted) {
+                            // First time spotting — set reaction delay (3–5 seconds at 60fps)
+                            enemy.spotted = true;
+                            enemy.reactionTimer = 180 + (Math.random() * 120) | 0;
+                            enemy.shootTimer = enemy.reactionTimer + 90; // don't fire during reaction
                         }
-                        enemy.shootTimer = 90 + (Math.random() * 60) | 0;
+                        // Count down reaction time before enemy is ready to shoot
+                        if (enemy.reactionTimer > 0) enemy.reactionTimer--;
+
+                        // Chase
+                        if (d > 1.0) {
+                            let spd = 0.006;
+                            let nx = enemy.x + (dx/d) * spd, ny = enemy.y + (dy/d) * spd;
+                            if (map[Math.floor(ny)][Math.floor(enemy.x)] === 0) enemy.y = ny;
+                            if (map[Math.floor(enemy.y)][Math.floor(nx)] === 0) enemy.x = nx;
+                        }
+
+                        // Only shoot after reaction time has elapsed
+                        if (enemy.reactionTimer <= 0) {
+                            enemy.shootTimer--;
+                            if (enemy.shootTimer <= 0) {
+                                let hitChance = Math.max(0.1, 1.0 - d * 0.1);
+                                if (Math.random() < hitChance) {
+                                    let dmg = Math.max(1, 12 - d * 1.2) | 0;
+                                    playerHp = Math.max(0, playerHp - dmg);
+                                    hpDisplay.textContent = playerHp + '%';
+                                    hitFlash = 12;
+                                }
+                                enemy.shootTimer = 90 + (Math.random() * 60) | 0;
+                            }
+                        }
+                    } else {
+                        // Lost line of sight
+                        enemy.losGapTimer++;
+                        // If out of sight for ~5 seconds, enemy loses track of player
+                        if (enemy.losGapTimer > 300) {
+                            enemy.spotted = false;
+                            enemy.reactionTimer = 0;
+                            enemy.losGapTimer = 0;
+                        }
                     }
                 });
 
