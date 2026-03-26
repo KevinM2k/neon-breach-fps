@@ -1,0 +1,760 @@
+<!doctype html>
+<html>
+    <head>
+        <title>Neon Breach FPS</title>
+        <style>
+            body {
+                margin: 0;
+                background: #000;
+                overflow: hidden;
+                font-family: "Courier New", Courier, monospace;
+            }
+            #game-container {
+                position: relative;
+                width: 1600px;
+                height: 800px;
+                margin: 20px auto;
+                border: 4px solid #0ff;
+            }
+            canvas {
+                display: block;
+                background: #111;
+            }
+            #ui {
+                position: absolute;
+                bottom: 10px;
+                left: 10px;
+                color: #0ff;
+                text-shadow: 0 0 5px #0ff;
+            }
+            #crosshair {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                color: #0ff;
+                font-weight: bold;
+                pointer-events: none;
+            }
+        </style>
+    </head>
+    <body>
+        <div id="game-container">
+            <canvas id="canvas" width="1600" height="800"></canvas>
+            <div id="crosshair">+</div>
+            <div id="ui">INTEGRITY: <span id="hp">100%</span> | KILLS: <span id="kills">0</span></div>
+        </div>
+
+        <script>
+            const canvas = document.getElementById("canvas");
+            const ctx = canvas.getContext("2d");
+            const hpDisplay = document.getElementById("hp");
+
+            const map = [
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 0, 1, 1, 0, 1, 1, 1, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 1, 0, 1],
+                [1, 1, 1, 0, 1, 1, 0, 1, 0, 1],
+                [1, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+                [1, 0, 1, 0, 0, 0, 1, 1, 0, 1],
+                [1, 0, 1, 1, 1, 0, 0, 0, 0, 1],
+                [1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            ];
+
+            let playerHp = 100;
+            let isDead = false;
+            let hitFlash = 0;
+            let muzzleLife = 0;
+            let kills = 0;
+            let spawnTimer = 180;
+            let heartbeatTimer = 60;
+            let heartbeatLub = true;
+            let gameFrame = 0;
+            const impacts = [];
+
+            const medkits = [
+                { x: 3.5, y: 1.5, active: true },
+                { x: 6.5, y: 8.5, active: true },
+                { x: 8.5, y: 3.5, active: true },
+            ];
+            const killsDisplay = document.getElementById("kills");
+
+            // Valid spawn cells (all open map tiles)
+            const spawnPoints = [];
+            for (let row = 0; row < 10; row++)
+                for (let col = 0; col < 10; col++)
+                    if (map[row][col] === 0) spawnPoints.push({ x: col + 0.5, y: row + 0.5 });
+
+            const ENEMY_MAX_HP = 3;
+            function makeEnemy(x, y) {
+                return { x, y, hp: ENEMY_MAX_HP, shootTimer: 180, dead: false, flash: 0,
+                         spotted: false, reactionTimer: 0, losGapTimer: 0 };
+            }
+
+            const enemies = [
+                makeEnemy(5.5, 5.5),
+                makeEnemy(7.5, 2.5),
+                makeEnemy(2.5, 7.5),
+            ];
+
+            function spawnEnemy() {
+                const alive = enemies.filter(e => !e.dead).length;
+                if (alive >= 10) return;
+                const valid = spawnPoints.filter(p => {
+                    let dx = p.x - player.x, dy = p.y - player.y;
+                    return Math.sqrt(dx*dx + dy*dy) > 4;
+                });
+                if (!valid.length) return;
+                const p = valid[Math.floor(Math.random() * valid.length)];
+                enemies.push(makeEnemy(p.x, p.y));
+            }
+
+            // ---- Audio ----
+            let audioCtx = null;
+            function getAudio() {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+                return audioCtx;
+            }
+
+            function playGunshot() {
+                const ac = getAudio();
+                const now = ac.currentTime;
+
+                // Crack — short white noise burst
+                const crackLen = ac.sampleRate * 0.08;
+                const crackBuf = ac.createBuffer(1, crackLen, ac.sampleRate);
+                const crackData = crackBuf.getChannelData(0);
+                for (let i = 0; i < crackLen; i++) crackData[i] = Math.random() * 2 - 1;
+                const crack = ac.createBufferSource();
+                crack.buffer = crackBuf;
+                const crackFilter = ac.createBiquadFilter();
+                crackFilter.type = 'bandpass';
+                crackFilter.frequency.value = 1200;
+                crackFilter.Q.value = 0.8;
+                const crackGain = ac.createGain();
+                crackGain.gain.setValueAtTime(2.5, now);
+                crackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+                crack.connect(crackFilter);
+                crackFilter.connect(crackGain);
+                crackGain.connect(ac.destination);
+                crack.start(now);
+
+                // Boom — oscillator dropping fast
+                const boom = ac.createOscillator();
+                boom.type = 'sine';
+                boom.frequency.setValueAtTime(180, now);
+                boom.frequency.exponentialRampToValueAtTime(35, now + 0.15);
+                const boomGain = ac.createGain();
+                boomGain.gain.setValueAtTime(1.2, now);
+                boomGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+                boom.connect(boomGain);
+                boomGain.connect(ac.destination);
+                boom.start(now);
+                boom.stop(now + 0.2);
+            }
+
+            function playHeartbeat(volume) {
+                const ac = getAudio();
+                const now = ac.currentTime;
+                const osc = ac.createOscillator();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(65, now);
+                osc.frequency.exponentialRampToValueAtTime(28, now + 0.14);
+                const gain = ac.createGain();
+                gain.gain.setValueAtTime(volume, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+                osc.connect(gain); gain.connect(ac.destination);
+                osc.start(now); osc.stop(now + 0.2);
+            }
+
+            function playMedkit() {
+                const ac = getAudio();
+                const now = ac.currentTime;
+                [0, 0.1, 0.2].forEach((delay, i) => {
+                    const o = ac.createOscillator();
+                    o.type = 'sine';
+                    o.frequency.value = [440, 554, 659][i];
+                    const g = ac.createGain();
+                    g.gain.setValueAtTime(0.25, now + delay);
+                    g.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.25);
+                    o.connect(g); g.connect(ac.destination);
+                    o.start(now + delay); o.stop(now + delay + 0.3);
+                });
+            }
+            // ---- End Audio ----
+
+            function hasLOS(ax, ay, bx, by) {
+                let dx = bx - ax, dy = by - ay;
+                let steps = Math.ceil(Math.sqrt(dx*dx + dy*dy) / 0.08);
+                for (let i = 1; i < steps; i++) {
+                    let t = i / steps;
+                    let cx = Math.floor(ax + dx * t), cy = Math.floor(ay + dy * t);
+                    if (cx < 0 || cx >= 10 || cy < 0 || cy >= 10 || map[cy][cx] === 1) return false;
+                }
+                return true;
+            }
+
+            const player = {
+                x: 1.5, y: 1.5,
+                dir: 0,
+                pitch: 0,
+                isShooting: false,
+                isAiming: false,
+                aimFov: Math.PI / 3,   // smoothly interpolated FOV
+                shotTargetX: 800, shotTargetY: 400,
+                z: 0, velZ: 0, onGround: true,
+                vx: 0, vy: 0,
+            };
+            const keys = {};
+
+            function respawn() {
+                player.x = 1.5; player.y = 1.5; player.dir = 0; player.pitch = 0;
+                player.z = 0; player.velZ = 0; player.onGround = true; player.vx = 0; player.vy = 0;
+                playerHp = 100; hpDisplay.textContent = '100%';
+                isDead = false; hitFlash = 0; heartbeatTimer = 60; heartbeatLub = true;
+                medkits.forEach(m => m.active = true);
+                // Remove all enemies, fresh start
+                enemies.length = 0;
+                spawnTimer = 60;
+            }
+
+            window.addEventListener("keydown", (e) => {
+                keys[e.code] = true;
+                if (e.code === 'KeyR' && isDead) respawn();
+            });
+            window.addEventListener("keyup", (e) => (keys[e.code] = false));
+
+            canvas.addEventListener("click", () => {
+                if (document.pointerLockElement !== canvas) {
+                    canvas.requestPointerLock();
+                }
+            });
+            document.addEventListener("mousedown", (e) => {
+                if (document.pointerLockElement !== canvas) return;
+                if (e.button === 2) { player.isAiming = true; e.preventDefault(); }
+                if (e.button === 0 && !player.isShooting) {
+                    player.isShooting = true;
+                    let dist = 0, ex = Math.cos(player.dir), ey = Math.sin(player.dir);
+                    while (dist < 15) {
+                        dist += 0.05;
+                        let tx = Math.floor(player.x + ex * dist), ty = Math.floor(player.y + ey * dist);
+                        if (tx < 0 || tx >= 10 || ty < 0 || ty >= 10 || map[ty][tx] === 1) break;
+                    }
+                    let spread = player.isAiming ? Math.min(8, dist * 0.5) : Math.min(60, dist * 4);
+                    player.shotTargetX = 800 + (Math.random() - 0.5) * spread;
+                    player.shotTargetY = 400 + (Math.random() - 0.5) * spread;
+
+                    // Muzzle flash
+                    muzzleLife = 1.0;
+                    playGunshot();
+
+                    // Enemy hit detection — only hit the nearest enemy in the cone
+                    let hitEnemy = false;
+                    let nearest = null, nearestDist = Infinity;
+                    enemies.forEach(e => {
+                        if (e.dead) return;
+                        let dx = e.x - player.x, dy = e.y - player.y;
+                        let d = Math.sqrt(dx*dx + dy*dy);
+                        let eAngle = Math.atan2(dy, dx);
+                        let diff = Math.abs(((eAngle - player.dir) + Math.PI*3) % (Math.PI*2) - Math.PI);
+                        // Zoomed: tight cone regardless of range. Hip: cone widens with distance
+                        let cone = player.isAiming ? 0.035 : Math.min(0.22, 0.06 + d * 0.015);
+                        if (diff < cone && d < nearestDist && hasLOS(player.x, player.y, e.x, e.y)) {
+                            nearest = e; nearestDist = d;
+                        }
+                    });
+                    if (nearest) {
+                        nearest.hp--;
+                        nearest.flash = 8;
+                        hitEnemy = true;
+                        if (nearest.hp <= 0) { nearest.dead = true; kills++; killsDisplay.textContent = kills; }
+                    }
+
+                    // Bullet impact at crosshair target
+                    impacts.push({
+                        x: player.shotTargetX,
+                        y: player.shotTargetY,
+                        life: 1.0,
+                        isBlood: hitEnemy,
+                        sparks: Array.from({ length: 8 }, () => ({
+                            angle: Math.random() * Math.PI * 2,
+                            speed: 1.5 + Math.random() * 3,
+                            len: 4 + Math.random() * 8,
+                        })),
+                    });
+
+                    setTimeout(() => (player.isShooting = false), 200);
+                }
+            });
+            document.addEventListener("mouseup", (e) => {
+                if (e.button === 2) player.isAiming = false;
+            });
+            canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+            document.addEventListener("mousemove", (e) => {
+                if (document.pointerLockElement === canvas) {
+                    player.dir += e.movementX * 0.002;
+                    player.pitch = Math.max(-300, Math.min(300, player.pitch - e.movementY * 0.5));
+                }
+            });
+
+            function update() {
+                if (isDead) return;
+
+                // Smoothly zoom FOV in/out
+                let targetFov = player.isAiming ? Math.PI / 20 : Math.PI / 3;
+                player.aimFov += (targetFov - player.aimFov) * 0.12;
+
+                const speed = keys["ShiftLeft"] || keys["ShiftRight"] ? 0.015 : 0.004;
+
+                let tx = 0, ty = 0;
+                if (keys["KeyW"]) { tx += Math.cos(player.dir) * speed; ty += Math.sin(player.dir) * speed; }
+                if (keys["KeyS"]) { tx -= Math.cos(player.dir) * speed; ty -= Math.sin(player.dir) * speed; }
+                if (keys["KeyA"]) { tx += Math.cos(player.dir - Math.PI/2) * speed; ty += Math.sin(player.dir - Math.PI/2) * speed; }
+                if (keys["KeyD"]) { tx += Math.cos(player.dir + Math.PI/2) * speed; ty += Math.sin(player.dir + Math.PI/2) * speed; }
+
+                // Smooth velocity
+                player.vx = player.vx * 0.75 + tx * 0.25;
+                player.vy = player.vy * 0.75 + ty * 0.25;
+
+                let newX = player.x + player.vx;
+                let newY = player.y + player.vy;
+
+                if (map[Math.floor(newY)][Math.floor(player.x)] === 0) player.y = newY;
+                if (map[Math.floor(player.y)][Math.floor(newX)] === 0) player.x = newX;
+
+                if (keys["Space"] && player.onGround) { player.velZ = 6; player.onGround = false; }
+                player.velZ -= 0.4;
+                player.z += player.velZ;
+                if (player.z <= 0) { player.z = 0; player.velZ = 0; player.onGround = true; }
+
+                // Spawn enemies on a timer (faster as kills increase)
+                spawnTimer--;
+                if (spawnTimer <= 0) {
+                    spawnEnemy();
+                    spawnTimer = Math.max(90, 300 - kills * 10);
+                }
+
+                // Decay animations
+                if (muzzleLife > 0) muzzleLife = Math.max(0, muzzleLife - 0.15);
+                for (let i = impacts.length - 1; i >= 0; i--) {
+                    impacts[i].life -= 0.07;
+                    if (impacts[i].life <= 0) impacts.splice(i, 1);
+                }
+
+                // Enemy AI
+                if (hitFlash > 0) hitFlash--;
+                enemies.forEach(enemy => {
+                    if (enemy.dead) return;
+                    if (enemy.flash > 0) enemy.flash--;
+                    let dx = player.x - enemy.x, dy = player.y - enemy.y;
+                    let d = Math.sqrt(dx*dx + dy*dy);
+                    if (!hasLOS(enemy.x, enemy.y, player.x, player.y)) return;
+                    // Chase
+                    if (d > 1.0) {
+                        let spd = 0.006;
+                        let nx = enemy.x + (dx/d) * spd, ny = enemy.y + (dy/d) * spd;
+                        if (map[Math.floor(ny)][Math.floor(enemy.x)] === 0) enemy.y = ny;
+                        if (map[Math.floor(enemy.y)][Math.floor(nx)] === 0) enemy.x = nx;
+                    }
+                    // Shoot — accuracy degrades with distance
+                    enemy.shootTimer--;
+                    if (enemy.shootTimer <= 0) {
+                        let hitChance = Math.max(0.1, 1.0 - d * 0.1); // 100% at 0, ~10% at 9+
+                        if (Math.random() < hitChance) {
+                            let dmg = Math.max(1, 12 - d * 1.2) | 0;
+                            playerHp = Math.max(0, playerHp - dmg);
+                            hpDisplay.textContent = playerHp + '%';
+                            hitFlash = 12;
+                        }
+                        enemy.shootTimer = 90 + (Math.random() * 60) | 0;
+                    }
+                });
+
+                gameFrame++;
+
+                // Heartbeat — speeds up as HP drops
+                if (!isDead) {
+                    heartbeatTimer--;
+                    if (heartbeatTimer <= 0) {
+                        if (heartbeatLub) {
+                            playHeartbeat(0.7);
+                            heartbeatTimer = 10; // gap between lub and dub
+                        } else {
+                            playHeartbeat(0.4);
+                            // Interval: fast at low HP, slow at full HP
+                            heartbeatTimer = Math.floor(30 + playerHp * 1.3);
+                        }
+                        heartbeatLub = !heartbeatLub;
+                    }
+                }
+
+                // Medkit pickup
+                medkits.forEach(m => {
+                    if (!m.active) return;
+                    let dx = m.x - player.x, dy = m.y - player.y;
+                    if (dx*dx + dy*dy < 0.4) {
+                        m.active = false;
+                        playerHp = 100;
+                        hpDisplay.textContent = '100%';
+                        playMedkit();
+                    }
+                });
+
+                // Death
+                if (playerHp <= 0 && !isDead) isDead = true;
+            }
+
+            function draw() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+                const numRays = 800;
+                const fov = player.aimFov;
+                const sliceW = 1600 / numRays;
+                const zoomFactor = Math.tan(Math.PI / 6) / Math.tan(fov / 2);
+                const vertOffset = player.pitch * zoomFactor + player.z * 2;
+                const zBuffer = new Float32Array(numRays);
+
+                let horizon = 400 + vertOffset;
+                let ceilGrad = ctx.createLinearGradient(0, 0, 0, horizon);
+                ceilGrad.addColorStop(0, "#0d0d0d");
+                ceilGrad.addColorStop(1, "#1c1410");
+                ctx.fillStyle = ceilGrad;
+                ctx.fillRect(0, 0, 1600, horizon);
+
+                let floorGrad = ctx.createLinearGradient(0, horizon, 0, 800);
+                floorGrad.addColorStop(0, "#3a2a18");
+                floorGrad.addColorStop(0.4, "#251a0e");
+                floorGrad.addColorStop(1, "#080808");
+                ctx.fillStyle = floorGrad;
+                ctx.fillRect(0, horizon, 1600, 800 - horizon);
+
+                // DDA Raycasting
+                for (let i = 0; i < numRays; i++) {
+                    let rayAngle = player.dir - fov / 2 + i * (fov / numRays);
+                    let rdx = Math.cos(rayAngle), rdy = Math.sin(rayAngle);
+                    let mx = Math.floor(player.x), my = Math.floor(player.y);
+                    let ddx = rdx === 0 ? 1e30 : Math.abs(1/rdx);
+                    let ddy = rdy === 0 ? 1e30 : Math.abs(1/rdy);
+                    let stepX, stepY, sdx, sdy;
+                    if (rdx < 0) { stepX = -1; sdx = (player.x - mx) * ddx; }
+                    else         { stepX =  1; sdx = (mx + 1 - player.x) * ddx; }
+                    if (rdy < 0) { stepY = -1; sdy = (player.y - my) * ddy; }
+                    else         { stepY =  1; sdy = (my + 1 - player.y) * ddy; }
+                    let side = 0;
+                    for (let s = 0; s < 30; s++) {
+                        if (sdx < sdy) { sdx += ddx; mx += stepX; side = 0; }
+                        else           { sdy += ddy; my += stepY; side = 1; }
+                        if (mx < 0 || mx >= 10 || my < 0 || my >= 10 || map[my][mx] === 1) break;
+                    }
+                    let perpDist = side === 0 ? sdx - ddx : sdy - ddy;
+                    zBuffer[i] = perpDist;
+                    let wallH = Math.floor(800 / perpDist * zoomFactor);
+                    let wallTop = Math.floor(400 - wallH / 2 + vertOffset);
+                    let bright = Math.min(1, 2.0 / perpDist);
+                    let fade = side === 1 ? 0.6 : 1.0;
+                    let x = Math.floor(i * sliceW);
+                    ctx.fillStyle = `rgb(${Math.floor(160*bright*fade)},${Math.floor(120*bright*fade)},${Math.floor(80*bright*fade)})`;
+                    ctx.fillRect(x, wallTop, Math.ceil(sliceW), wallH);
+                    if (wallH > 12) {
+                        ctx.fillStyle = `rgba(0,0,0,0.4)`;
+                        for (let course = 1; course <= 5; course++)
+                            ctx.fillRect(x, Math.floor(wallTop + wallH * (course/6)), Math.ceil(sliceW), 1);
+                    }
+                }
+
+                // Medkit sprites
+                medkits.forEach(m => {
+                    if (!m.active) return;
+                    let dx = m.x - player.x, dy = m.y - player.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy);
+                    let angle = Math.atan2(dy, dx) - player.dir;
+                    while (angle > Math.PI)  angle -= 2 * Math.PI;
+                    while (angle < -Math.PI) angle += 2 * Math.PI;
+                    if (Math.abs(angle) > fov / 2 + 0.2) return;
+                    let screenX = Math.floor((0.5 + angle / fov) * 1600);
+                    let bob = Math.sin(gameFrame * 0.05) * 6;
+                    let spriteH = Math.floor(280 / dist * zoomFactor);
+                    let spriteW = Math.floor(spriteH * 0.7);
+                    let spriteTop = Math.floor(400 - spriteH / 2 + vertOffset + bob);
+                    let startX = Math.max(0, screenX - spriteW / 2);
+                    let endX   = Math.min(1600, screenX + spriteW / 2);
+                    for (let sx = startX; sx < endX; sx++) {
+                        if (zBuffer[Math.min(numRays-1, Math.floor(sx / sliceW))] <= dist) continue;
+                        let t = (sx - startX) / spriteW;
+                        let isVBar = t > 0.38 && t < 0.62;
+                        // Box background
+                        ctx.fillStyle = '#0a2a0a';
+                        ctx.fillRect(sx, spriteTop, 1, spriteH);
+                        // Horizontal bar of cross
+                        ctx.fillStyle = '#dd1111';
+                        ctx.fillRect(sx, spriteTop + spriteH * 0.38, 1, spriteH * 0.24);
+                        // Vertical bar (center columns only)
+                        if (isVBar) {
+                            ctx.fillStyle = '#dd1111';
+                            ctx.fillRect(sx, spriteTop + spriteH * 0.15, 1, spriteH * 0.7);
+                        }
+                        // White highlight edge
+                        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                        ctx.fillRect(sx, spriteTop, 1, spriteH * 0.08);
+                    }
+                });
+
+                // Enemy sprites
+                enemies.forEach(enemy => {
+                    if (enemy.dead) return;
+                    let dx = enemy.x - player.x, dy = enemy.y - player.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy);
+                    let angle = Math.atan2(dy, dx) - player.dir;
+                    while (angle > Math.PI)  angle -= 2 * Math.PI;
+                    while (angle < -Math.PI) angle += 2 * Math.PI;
+                    if (Math.abs(angle) > fov / 2 + 0.2) return;
+                    let screenX = Math.floor((0.5 + angle / fov) * 1600);
+                    let spriteH = Math.floor(640 / dist * zoomFactor);
+                    let spriteW = Math.floor(spriteH * 0.55);
+                    let spriteTop = Math.floor(400 - spriteH / 2 + vertOffset);
+                    let startX = Math.max(0, screenX - spriteW / 2);
+                    let endX   = Math.min(1600, screenX + spriteW / 2);
+                    let hit = enemy.flash > 0;
+                    let visible = false;
+                    for (let sx = startX; sx < endX; sx++) {
+                        if (zBuffer[Math.min(numRays-1, Math.floor(sx / sliceW))] <= dist) continue;
+                        visible = true;
+                        let t = (sx - startX) / spriteW; // 0=left edge, 1=right edge
+                        let isArm = t < 0.15 || t > 0.85;
+                        let isCenterBody = t >= 0.15 && t <= 0.85;
+
+                        // --- Legs ---
+                        // Split into left/right leg with gap in middle
+                        let legColor = hit ? '#ff6644' : (t > 0.42 && t < 0.58 ? '#111' : '#1a1f10');
+                        ctx.fillStyle = legColor;
+                        ctx.fillRect(sx, spriteTop + spriteH * 0.63, 1, spriteH * 0.37);
+
+                        // Boot highlight
+                        if (t > 0.15 && t < 0.42 || t > 0.58 && t < 0.85) {
+                            ctx.fillStyle = hit ? '#ff8866' : '#252b18';
+                            ctx.fillRect(sx, spriteTop + spriteH * 0.88, 1, spriteH * 0.12);
+                        }
+
+                        // --- Waist/belt ---
+                        ctx.fillStyle = hit ? '#ff4422' : '#111';
+                        ctx.fillRect(sx, spriteTop + spriteH * 0.59, 1, spriteH * 0.05);
+
+                        // --- Torso / chest armor ---
+                        if (isArm) {
+                            // Arms slightly lighter than torso
+                            ctx.fillStyle = hit ? '#ff5533' : '#2a3520';
+                            ctx.fillRect(sx, spriteTop + spriteH * 0.30, 1, spriteH * 0.30);
+                        } else {
+                            // Chest plate
+                            ctx.fillStyle = hit ? '#ff3311' : '#1e2818';
+                            ctx.fillRect(sx, spriteTop + spriteH * 0.30, 1, spriteH * 0.29);
+                            // Chest plate highlight stripe down center
+                            if (t > 0.45 && t < 0.55) {
+                                ctx.fillStyle = hit ? '#ff6644' : '#2e3c22';
+                                ctx.fillRect(sx, spriteTop + spriteH * 0.31, 1, spriteH * 0.27);
+                            }
+                        }
+
+                        // --- Neck ---
+                        if (isCenterBody && t > 0.38 && t < 0.62) {
+                            ctx.fillStyle = hit ? '#ffaa88' : '#8a6040';
+                            ctx.fillRect(sx, spriteTop + spriteH * 0.24, 1, spriteH * 0.07);
+                        }
+
+                        // --- Head / helmet ---
+                        // Helmet (top rounded dome effect — darker at edges)
+                        let headEdge = t < 0.22 || t > 0.78;
+                        ctx.fillStyle = hit ? '#ff9977' : (headEdge ? '#111' : '#1a1a1a');
+                        ctx.fillRect(sx, spriteTop + spriteH * 0.06, 1, spriteH * 0.18);
+
+                        // Visor band (glowing red eyes)
+                        if (isCenterBody) {
+                            ctx.fillStyle = hit ? '#ffcc00' : '#0a0000';
+                            ctx.fillRect(sx, spriteTop + spriteH * 0.14, 1, spriteH * 0.07);
+                            // Red eye glow — two spots in visor
+                            let eyeL = t > 0.28 && t < 0.40;
+                            let eyeR = t > 0.60 && t < 0.72;
+                            if (eyeL || eyeR) {
+                                ctx.fillStyle = hit ? '#ffffff' : `rgba(255,30,0,0.95)`;
+                                ctx.fillRect(sx, spriteTop + spriteH * 0.155, 1, spriteH * 0.04);
+                            }
+                        }
+                    }
+
+                    // Health bar — only if damaged and at least partially visible
+                    if (visible && enemy.hp < ENEMY_MAX_HP) {
+                        let barW = Math.max(30, Math.min(100, spriteW));
+                        let barH = Math.max(5, spriteH * 0.035);
+                        let barX = screenX - barW / 2;
+                        let barY = spriteTop + spriteH * 0.03 - barH - 8;
+                        // background
+                        ctx.fillStyle = "#300";
+                        ctx.fillRect(barX, barY, barW, barH);
+                        // fill — green → red as hp drops
+                        let pct = enemy.hp / ENEMY_MAX_HP;
+                        ctx.fillStyle = pct > 0.5 ? "#4c4" : pct > 0.25 ? "#fc0" : "#f44";
+                        ctx.fillRect(barX, barY, barW * pct, barH);
+                        // border
+                        ctx.strokeStyle = "#000";
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(barX, barY, barW, barH);
+                    }
+                });
+
+                // Hit flash
+                if (hitFlash > 0) {
+                    ctx.fillStyle = `rgba(180,0,0,${hitFlash / 25})`;
+                    ctx.fillRect(0, 0, 1600, 800);
+                }
+
+                // aimProgress: 0 = hip, 1 = fully scoped
+                let aimProgress = 1 - (player.aimFov - Math.PI/20) / (Math.PI/3 - Math.PI/20);
+                aimProgress = Math.max(0, Math.min(1, aimProgress));
+
+                // Muzzle flash at bottom-center (gun implied off screen)
+                if (muzzleLife > 0 && aimProgress < 0.9) {
+                    let ml = muzzleLife;
+                    let bx = 800, by = 800;
+                    ctx.save();
+                    ctx.globalAlpha = ml;
+                    let grad = ctx.createRadialGradient(bx, by, 0, bx, by, 40 * ml);
+                    grad.addColorStop(0, "rgba(255,255,180,0.95)");
+                    grad.addColorStop(0.4, "rgba(255,160,20,0.7)");
+                    grad.addColorStop(1, "rgba(255,60,0,0)");
+                    ctx.fillStyle = grad;
+                    ctx.beginPath(); ctx.arc(bx, by, 40 * ml, 0, Math.PI*2); ctx.fill();
+                    ctx.fillStyle = `rgba(255,255,220,${ml})`;
+                    ctx.beginPath(); ctx.arc(bx, by, 10 * ml, 0, Math.PI*2); ctx.fill();
+                    ctx.strokeStyle = `rgba(255,200,50,${ml * 0.9})`;
+                    ctx.lineWidth = 1.5;
+                    for (let s = 0; s < 7; s++) {
+                        let a = -Math.PI/2 + (s - 3) * 0.3;
+                        let len = (20 + s * 5) * ml;
+                        ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx + Math.cos(a) * len, by + Math.sin(a) * len); ctx.stroke();
+                    }
+                    ctx.restore();
+                }
+
+                // Scope overlay — fades in
+                if (aimProgress > 0.05) {
+                    let alpha = Math.min(1, (aimProgress - 0.05) / 0.45);
+                    const cx = 800, cy = 400, r = 220;
+                    ctx.save();
+                    ctx.globalAlpha = alpha;
+                    // dark surround with circular hole
+                    ctx.fillStyle = "rgba(0,0,0,0.93)";
+                    ctx.beginPath();
+                    ctx.rect(0, 0, 1600, 800);
+                    ctx.arc(cx, cy, r, 0, Math.PI*2, true);
+                    ctx.fill("evenodd");
+                    // lens tint
+                    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.clip();
+                    ctx.fillStyle = "rgba(0,20,0,0.15)"; ctx.fillRect(0, 0, 1600, 800);
+                    ctx.restore();
+                    // ring
+                    ctx.save();
+                    ctx.globalAlpha = alpha;
+                    ctx.strokeStyle = "#111"; ctx.lineWidth = 14;
+                    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.stroke();
+                    ctx.strokeStyle = "#333"; ctx.lineWidth = 3;
+                    ctx.beginPath(); ctx.arc(cx, cy, r-6, 0, Math.PI*2); ctx.stroke();
+                    // reticle
+                    ctx.strokeStyle = "rgba(0,0,0,0.85)"; ctx.lineWidth = 1.5;
+                    let gap = 24;
+                    ctx.beginPath(); ctx.moveTo(cx-r+16,cy); ctx.lineTo(cx-gap,cy); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(cx+gap,cy); ctx.lineTo(cx+r-16,cy); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(cx,cy-r+16); ctx.lineTo(cx,cy-gap); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(cx,cy+gap); ctx.lineTo(cx,cy+r-16); ctx.stroke();
+                    ctx.fillStyle = "rgba(0,0,0,0.9)";
+                    ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI*2); ctx.fill();
+                    for (let d = 1; d <= 3; d++) {
+                        let off = d * 52;
+                        [[cx+off,cy],[cx-off,cy],[cx,cy+off],[cx,cy-off]].forEach(([px,py]) => {
+                            ctx.fillStyle = "rgba(0,0,0,0.7)";
+                            ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI*2); ctx.fill();
+                        });
+                    }
+                    // scope muzzle flash
+                    if (muzzleLife > 0) {
+                        let ml = muzzleLife;
+                        let grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, 18 * ml);
+                        grad.addColorStop(0, `rgba(255,255,200,${ml})`);
+                        grad.addColorStop(1, "rgba(255,100,0,0)");
+                        ctx.fillStyle = grad;
+                        ctx.beginPath(); ctx.arc(cx, cy, 18 * ml, 0, Math.PI*2); ctx.fill();
+                    }
+                    ctx.restore();
+                }
+
+                // Bullet impact animations (drawn on top of everything)
+                impacts.forEach(imp => {
+                    let t = 1 - imp.life;   // 0 = just fired, 1 = faded
+                    let alpha = imp.life;
+                    let ringR = 4 + t * 18;
+                    ctx.save();
+                    if (imp.isBlood) {
+                        // Blood hit — red splatter
+                        ctx.fillStyle = `rgba(180,0,0,${alpha * 0.9})`;
+                        ctx.beginPath(); ctx.arc(imp.x, imp.y, ringR * 0.6, 0, Math.PI*2); ctx.fill();
+                        ctx.strokeStyle = `rgba(220,30,30,${alpha * 0.7})`;
+                        ctx.lineWidth = 2;
+                        ctx.beginPath(); ctx.arc(imp.x, imp.y, ringR, 0, Math.PI*2); ctx.stroke();
+                        imp.sparks.forEach(sp => {
+                            let ex = imp.x + Math.cos(sp.angle) * sp.len * (1 + t * 2);
+                            let ey = imp.y + Math.sin(sp.angle) * sp.len * (1 + t * 2);
+                            ctx.strokeStyle = `rgba(200,0,0,${alpha * 0.6})`;
+                            ctx.lineWidth = 1.5;
+                            ctx.beginPath(); ctx.moveTo(imp.x, imp.y); ctx.lineTo(ex, ey); ctx.stroke();
+                        });
+                    } else {
+                        // Wall hit — yellow/grey sparks + ring
+                        let grad = ctx.createRadialGradient(imp.x, imp.y, 0, imp.x, imp.y, ringR);
+                        grad.addColorStop(0, `rgba(255,240,180,${alpha})`);
+                        grad.addColorStop(1, "rgba(180,120,0,0)");
+                        ctx.fillStyle = grad;
+                        ctx.beginPath(); ctx.arc(imp.x, imp.y, ringR, 0, Math.PI*2); ctx.fill();
+                        ctx.strokeStyle = `rgba(255,200,80,${alpha * 0.8})`;
+                        ctx.lineWidth = 1.5;
+                        ctx.beginPath(); ctx.arc(imp.x, imp.y, ringR * 1.4, 0, Math.PI*2); ctx.stroke();
+                        imp.sparks.forEach(sp => {
+                            let ex = imp.x + Math.cos(sp.angle) * sp.len * (1 + t * 3);
+                            let ey = imp.y + Math.sin(sp.angle) * sp.len * (1 + t * 3);
+                            ctx.strokeStyle = `rgba(255,180,30,${alpha * 0.7})`;
+                            ctx.lineWidth = 1;
+                            ctx.beginPath(); ctx.moveTo(imp.x, imp.y); ctx.lineTo(ex, ey); ctx.stroke();
+                        });
+                    }
+                    ctx.restore();
+                });
+
+                // Death screen
+                if (isDead) {
+                    ctx.fillStyle = 'rgba(80,0,0,0.88)';
+                    ctx.fillRect(0, 0, 1600, 800);
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = '#cc0000';
+                    ctx.font = 'bold 130px "Courier New"';
+                    ctx.fillText('YOU DIED', 800, 340);
+                    ctx.fillStyle = '#aaa';
+                    ctx.font = '44px "Courier New"';
+                    ctx.fillText(`Kills: ${kills}`, 800, 430);
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '36px "Courier New"';
+                    ctx.fillText('Press R to respawn', 800, 510);
+                    ctx.textAlign = 'left';
+                }
+            }
+
+            function loop() {
+                update();
+                draw();
+                requestAnimationFrame(loop);
+            }
+
+            loop();
+        </script>
+    </body>
+</html>
