@@ -105,9 +105,27 @@
         <script>
             const canvas = document.getElementById("canvas");
             const ctx = canvas.getContext("2d");
+            const SCREEN_W = canvas.width;
+            const SCREEN_H = canvas.height;
+            const HALF_W = SCREEN_W / 2;
+            const HALF_H = SCREEN_H / 2;
+            const MAP_W = 16;
+            const MAP_H = 16;
+            const MAP_SIZE = MAP_W * MAP_H;
+            const NUM_RAYS = 800;
+            const SLICE_W = SCREEN_W / NUM_RAYS;
+            const TEX_SIZE = 128;
+            const LITTLE_ENDIAN = new Uint8Array(new Uint32Array([0x11223344]).buffer)[0] === 0x44;
+            const sceneImage = ctx.createImageData(SCREEN_W, SCREEN_H);
+            const scenePixels = new Uint32Array(sceneImage.data.buffer);
+            const zBuffer = new Float32Array(NUM_RAYS);
+            const pathQueueX = new Int16Array(MAP_SIZE);
+            const pathQueueY = new Int16Array(MAP_SIZE);
+            const pathPrev = new Int16Array(MAP_SIZE);
+            const pathVisited = new Uint8Array(MAP_SIZE);
 
             // map cell values: 0=open, 1=wall
-            const map = Array.from({length: 16}, () => new Array(16).fill(1));
+            const map = Array.from({length: MAP_H}, () => new Array(MAP_W).fill(1));
 
             let playerHp = 100;
             const playerRadius = 0.28;
@@ -143,6 +161,23 @@
             const ceilCanvas = document.createElement('canvas');
             ceilCanvas.width = 128; ceilCanvas.height = 128;
             const cctx = ceilCanvas.getContext('2d');
+
+            function packColor(r, g, b, a = 255) {
+                if (LITTLE_ENDIAN) return (((a & 255) << 24) | ((b & 255) << 16) | ((g & 255) << 8) | (r & 255)) >>> 0;
+                return (((r & 255) << 24) | ((g & 255) << 16) | ((b & 255) << 8) | (a & 255)) >>> 0;
+            }
+
+            function buildPackedTexture(texCtx) {
+                const texData = texCtx.getImageData(0, 0, TEX_SIZE, TEX_SIZE);
+                return new Uint32Array(texData.data.buffer);
+            }
+
+            function shadePackedColor(packed, brightness) {
+                const r = packed & 255;
+                const g = (packed >>> 8) & 255;
+                const b = (packed >>> 16) & 255;
+                return packColor((r * brightness) | 0, (g * brightness) | 0, (b * brightness) | 0);
+            }
 
             function generateTextures() {
                 // Wall Texture: Cyber-panel
@@ -197,6 +232,74 @@
                 for(let i=0; i<128; i+=32) cctx.fillRect(i-2,i-2,4,4);
             }
             generateTextures();
+            const floorTexturePixels = buildPackedTexture(fctx);
+            const ceilTexturePixels = buildPackedTexture(cctx);
+
+            function renderSceneBackground(horizon, vertOffset, zoomFactor, fov) {
+                const posZ = HALF_H * zoomFactor;
+                const leftAngle = player.dir - fov / 2;
+                const leftCos = Math.cos(leftAngle);
+                const leftSin = Math.sin(leftAngle);
+                const strafeCos = Math.cos(player.dir + Math.PI / 2);
+                const strafeSin = Math.sin(player.dir + Math.PI / 2);
+
+                for (let y = 0; y < SCREEN_H; y++) {
+                    const rowStart = y * SCREEN_W;
+                    if (y < horizon) {
+                        const skyT = Math.min(1, y / Math.max(1, horizon));
+                        scenePixels.fill(
+                            packColor(
+                                2 + (6 * skyT) | 0,
+                                3 + (9 * skyT) | 0,
+                                5 + (15 * skyT) | 0
+                            ),
+                            rowStart,
+                            rowStart + SCREEN_W
+                        );
+                    } else {
+                        const floorT = Math.min(1, (y - horizon) / Math.max(1, SCREEN_H - horizon));
+                        scenePixels.fill(
+                            packColor(
+                                4 + (6 * floorT) | 0,
+                                10 + (12 * floorT) | 0,
+                                14 + (16 * floorT) | 0
+                            ),
+                            rowStart,
+                            rowStart + SCREEN_W
+                        );
+                    }
+
+                    const p = y - HALF_H - vertOffset;
+                    if (p === 0) continue;
+
+                    const isFloor = y > horizon;
+                    const isCeil = y < horizon;
+                    if (!isFloor && !isCeil) continue;
+
+                    const rowDist = posZ / Math.abs(p);
+                    if (rowDist > 14) continue;
+
+                    const stepX = rowDist * fov / SCREEN_W * strafeCos;
+                    const stepY = rowDist * fov / SCREEN_W * strafeSin;
+                    let worldX = player.x + rowDist * leftCos;
+                    let worldY = player.y + rowDist * leftSin;
+                    let bright = Math.min(1, 3 / rowDist);
+                    bright = isCeil ? bright * 0.45 + 0.2 : bright * 0.75 + 0.15;
+                    const texture = isFloor ? floorTexturePixels : ceilTexturePixels;
+
+                    for (let x = 0; x < SCREEN_W; x += 2) {
+                        const texX = ((worldX * TEX_SIZE) | 0) & (TEX_SIZE - 1);
+                        const texY = ((worldY * TEX_SIZE) | 0) & (TEX_SIZE - 1);
+                        const shaded = shadePackedColor(texture[texY * TEX_SIZE + texX], bright);
+                        scenePixels[rowStart + x] = shaded;
+                        if (x + 1 < SCREEN_W) scenePixels[rowStart + x + 1] = shaded;
+                        worldX += stepX * 2;
+                        worldY += stepY * 2;
+                    }
+                }
+
+                ctx.putImageData(sceneImage, 0, 0);
+            }
 
             // ---- Procedural map generation ----
             function applyNewMap() {
@@ -536,30 +639,71 @@
                 const sx = Math.floor(fromX), sy = Math.floor(fromY);
                 const ex = Math.floor(toX),   ey = Math.floor(toY);
                 if (sx === ex && sy === ey) return [];
-                const queue = [[sx, sy]];
-                const prev  = {};
-                const visited = new Set([`${sx},${sy}`]);
-                const dirs = [[1,0],[-1,0],[0,1],[0,-1]];
-                while (queue.length) {
-                    const [cx, cy] = queue.shift();
+                pathVisited.fill(0);
+                pathPrev.fill(-1);
+                let head = 0, tail = 0;
+                pathQueueX[tail] = sx;
+                pathQueueY[tail] = sy;
+                tail++;
+                pathVisited[sy * MAP_W + sx] = 1;
+
+                while (head < tail) {
+                    const cx = pathQueueX[head];
+                    const cy = pathQueueY[head];
+                    head++;
                     if (cx === ex && cy === ey) {
                         const path = [];
-                        let k = `${cx},${cy}`;
-                        while (prev[k]) {
-                            const [px, py] = k.split(',').map(Number);
+                        let idx = cy * MAP_W + cx;
+                        while (idx !== sy * MAP_W + sx) {
+                            const px = idx % MAP_W;
+                            const py = (idx / MAP_W) | 0;
                             path.unshift({ x: px + 0.5, y: py + 0.5 });
-                            k = prev[k];
+                            idx = pathPrev[idx];
                         }
                         return path;
                     }
-                    for (const [dx, dy] of dirs) {
-                        const nx = cx + dx, ny = cy + dy;
-                        const k = `${nx},${ny}`;
-                        if (nx >= 0 && nx < 16 && ny >= 0 && ny < 16 &&
-                            map[ny][nx] === 0 && !visited.has(k)) {
-                            visited.add(k);
-                            prev[k] = `${cx},${cy}`;
-                            queue.push([nx, ny]);
+                    const left = cx - 1;
+                    if (left >= 0) {
+                        const idx = cy * MAP_W + left;
+                        if (!pathVisited[idx] && map[cy][left] === 0) {
+                            pathVisited[idx] = 1;
+                            pathPrev[idx] = cy * MAP_W + cx;
+                            pathQueueX[tail] = left;
+                            pathQueueY[tail] = cy;
+                            tail++;
+                        }
+                    }
+                    const right = cx + 1;
+                    if (right < MAP_W) {
+                        const idx = cy * MAP_W + right;
+                        if (!pathVisited[idx] && map[cy][right] === 0) {
+                            pathVisited[idx] = 1;
+                            pathPrev[idx] = cy * MAP_W + cx;
+                            pathQueueX[tail] = right;
+                            pathQueueY[tail] = cy;
+                            tail++;
+                        }
+                    }
+                    const up = cy - 1;
+                    if (up >= 0) {
+                        const idx = up * MAP_W + cx;
+                        if (!pathVisited[idx] && map[up][cx] === 0) {
+                            pathVisited[idx] = 1;
+                            pathPrev[idx] = cy * MAP_W + cx;
+                            pathQueueX[tail] = cx;
+                            pathQueueY[tail] = up;
+                            tail++;
+                        }
+                    }
+                    const down = cy + 1;
+                    if (down < MAP_H) {
+                        const idx = down * MAP_W + cx;
+                        if (!pathVisited[idx] && map[down][cx] === 0) {
+                            pathVisited[idx] = 1;
+                            pathPrev[idx] = cy * MAP_W + cx;
+                            pathQueueX[tail] = cx;
+                            pathQueueY[tail] = down;
+                            tail++;
                         }
                     }
                 }
@@ -567,12 +711,30 @@
             }
 
             function hasLOS(ax, ay, bx, by) {
-                let dx = bx - ax, dy = by - ay;
-                let steps = Math.ceil(Math.sqrt(dx*dx + dy*dy) / 0.08);
-                for (let i = 1; i < steps; i++) {
-                    let t = i / steps;
-                    let cx = Math.floor(ax + dx * t), cy = Math.floor(ay + dy * t);
-                    if (cx < 0 || cx >= 16 || cy < 0 || cy >= 16 || map[cy][cx] === 1) return false;
+                const dx = bx - ax;
+                const dy = by - ay;
+                let cx = Math.floor(ax);
+                let cy = Math.floor(ay);
+                const endX = Math.floor(bx);
+                const endY = Math.floor(by);
+                if (cx === endX && cy === endY) return true;
+
+                const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+                const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+                const invDx = dx === 0 ? Infinity : Math.abs(1 / dx);
+                const invDy = dy === 0 ? Infinity : Math.abs(1 / dy);
+                let tMaxX = stepX > 0 ? (Math.floor(ax) + 1 - ax) * invDx : stepX < 0 ? (ax - Math.floor(ax)) * invDx : Infinity;
+                let tMaxY = stepY > 0 ? (Math.floor(ay) + 1 - ay) * invDy : stepY < 0 ? (ay - Math.floor(ay)) * invDy : Infinity;
+
+                while (cx !== endX || cy !== endY) {
+                    if (tMaxX < tMaxY) {
+                        cx += stepX;
+                        tMaxX += invDx;
+                    } else {
+                        cy += stepY;
+                        tMaxY += invDy;
+                    }
+                    if (cx < 0 || cx >= MAP_W || cy < 0 || cy >= MAP_H || map[cy][cx] === 1) return false;
                 }
                 return true;
             }
@@ -656,10 +818,10 @@
                 while (wallDist < 15) {
                     wallDist += 0.05;
                     let tx = Math.floor(player.x + ex * wallDist), ty = Math.floor(player.y + ey * wallDist);
-                    if (tx < 0 || tx >= 10 || ty < 0 || ty >= 10 || map[ty][tx] === 1) break;
+                    if (tx < 0 || tx >= MAP_W || ty < 0 || ty >= MAP_H || map[ty][tx] === 1) break;
                 }
                 // Per-weapon spread
-                let hipMult = 28, hipMax = 440, aimMult = 0.5, aimMax = 8;
+                let hipMult = 28, hipMax = 440, aimMult = 2.2, aimMax = 34;
                 if (weapon === 'machinegun') { hipMult = 50; hipMax = 700; aimMult = 0.9; aimMax = 20; }
                 if (weapon === 'sniper')     { hipMult = 12; hipMax = 180; aimMult = 0.08; aimMax = 1; }
                 let spread = player.isAiming
@@ -766,7 +928,13 @@
                 if (paused || isDead) return;
 
                 // Smoothly zoom FOV in/out
-                let scopedFov = player.weapon === 'sniper' ? Math.PI / 32 : Math.PI / 8;
+                let scopedFov = player.weapon === 'sniper'
+                    ? Math.PI / 32
+                    : player.weapon === 'pistol'
+                    ? Math.PI / 3.6
+                    : player.weapon === 'machinegun'
+                    ? Math.PI / 3.9
+                    : Math.PI / 8;
                 let targetFov = player.isAiming ? scopedFov : Math.PI / 3;
                 player.aimFov += (targetFov - player.aimFov) * 0.12;
 
@@ -778,7 +946,7 @@
                     player.autoFireTimer = 0;
                 }
 
-                const speed = keys["ShiftLeft"] || keys["ShiftRight"] ? 0.015 : 0.004;
+                const speed = keys["ShiftLeft"] || keys["ShiftRight"] ? 0.04 : 0.02;
 
                 let tx = 0, ty = 0;
                 if (keys["KeyW"]) { tx += Math.cos(player.dir) * speed; ty += Math.sin(player.dir) * speed; }
@@ -787,8 +955,8 @@
                 if (keys["KeyD"]) { tx += Math.cos(player.dir + Math.PI/2) * speed; ty += Math.sin(player.dir + Math.PI/2) * speed; }
 
                 // Smooth velocity
-                player.vx = player.vx * 0.75 + tx * 0.25;
-                player.vy = player.vy * 0.75 + ty * 0.25;
+                player.vx = player.vx * 0.15 + tx * 0.85;
+                player.vy = player.vy * 0.15 + ty * 0.85;
 
                 // Radius-based collision
                 let newX = player.x + player.vx;
@@ -1440,68 +1608,29 @@
 
             function draw() {
                 if (gameState === 'menu') { drawMenu(); return; }
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-                const numRays = 800;
+                const numRays = NUM_RAYS;
                 const fov = player.aimFov;
-                const sliceW = 1600 / numRays;
+                const sliceW = SLICE_W;
                 const zoomFactor = Math.tan(Math.PI / 6) / Math.tan(fov / 2);
                 const vertOffset = player.pitch * zoomFactor + player.z * 2;
-                const zBuffer = new Float32Array(numRays);
-
-                let horizon = 400 + vertOffset;
-
-                // Ceiling — near-black with deep blue tint
-                let ceilGrad = ctx.createLinearGradient(0, 0, 0, horizon);
-                ceilGrad.addColorStop(0, "#020305");
-                ceilGrad.addColorStop(1, "#080c14");
-                ctx.fillStyle = ceilGrad;
-                ctx.fillRect(0, 0, 1600, horizon);
+                const horizon = HALF_H + vertOffset;
+                renderSceneBackground(horizon, vertOffset, zoomFactor, fov);
 
                 // Ceiling strip-light reflections at depth intervals
                 ctx.strokeStyle = "rgba(0,210,230,0.055)";
                 ctx.lineWidth = 2;
                 for (let d = 1; d <= 10; d++) {
-                    let cy = horizon - 400 * zoomFactor / d;
+                    let cy = horizon - HALF_H * zoomFactor / d;
                     if (cy < 0) continue;
-                    ctx.beginPath(); ctx.moveTo(0, Math.floor(cy)); ctx.lineTo(1600, Math.floor(cy)); ctx.stroke();
-                }
-
-                // Textured Floor and Ceiling
-                for (let y = 0; y < 800; y++) {
-                    let p = y - 400 - vertOffset; // vertical distance from horizon
-                    let isFloor = y > horizon;
-                    let isCeil = y < horizon;
-                    if (!isFloor && !isCeil) continue;
-                    
-                    let posZ = 0.5 * 800 * zoomFactor; // distance of projection plane
-                    let rowDist = posZ / Math.abs(p);
-                    
-                    if (rowDist > 14) continue; // distance fog
-
-                    let stepX = rowDist * fov / 800 * Math.cos(player.dir + Math.PI/2);
-                    let stepY = rowDist * fov / 800 * Math.sin(player.dir + Math.PI/2);
-                    let floorX = player.x + rowDist * Math.cos(player.dir - fov/2);
-                    let floorY = player.y + rowDist * Math.sin(player.dir - fov/2);
-
-                    let tex = isFloor ? floorCanvas : ceilCanvas;
-                    let bright = Math.min(1.0, 3.0 / rowDist);
-                    
-                    // Optimization: Draw in chunks or just use the current scanline logic
-                    // We'll use a simplified version for performance in a single file
-                    if (y % 2 === 0) { // skip lines for performance
-                        ctx.globalAlpha = 0.25 * bright;
-                        ctx.drawImage(tex, (floorX * 128) % 128, (floorY * 128) % 128, 1, 1, 0, y, 1600, 2);
-                        ctx.globalAlpha = 1.0;
-                    }
+                    ctx.beginPath(); ctx.moveTo(0, Math.floor(cy)); ctx.lineTo(SCREEN_W, Math.floor(cy)); ctx.stroke();
                 }
 
                 // Vertical perspective lines for floor
                 ctx.strokeStyle = "rgba(0,185,165,0.06)";
                 for (let vx = -10; vx <= 20; vx++) {
                     ctx.beginPath();
-                    ctx.moveTo(800 + (vx - player.x % 1 - 5) * 2000, 800);
-                    ctx.lineTo(800, horizon);
+                    ctx.moveTo(HALF_W + (vx - player.x % 1 - 5) * 2000, SCREEN_H);
+                    ctx.lineTo(HALF_W, horizon);
                     ctx.stroke();
                 }
 

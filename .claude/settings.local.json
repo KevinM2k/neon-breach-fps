@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check /Users/kevin/code/github/kevinm2k/neon-breach-fps/index.html)",
+      "Bash(git push:*)"
+    ]
+  }
+}
