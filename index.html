@@ -1,70 +1,31 @@
 <!doctype html>
 <html>
     <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
         <title>Neon Breach FPS</title>
         <style>
-            body {
-                margin: 0;
-                background: #000;
-                overflow: hidden;
-                font-family: "Courier New", Courier, monospace;
-            }
-            #title {
-                text-align: center;
-                padding: 18px 0 10px;
-                letter-spacing: 0.18em;
-                user-select: none;
-            }
-            #title .word-neon   { font-size: 62px; font-weight: 900; color: #0ff;
-                                  text-shadow: 0 0 8px #0ff, 0 0 24px #0cf, 0 0 60px #08f;
-                                  display: inline-block; animation: flicker 6s infinite; }
-            #title .word-breach { font-size: 76px; font-weight: 900; color: #fff;
-                                  text-shadow: 0 0 6px #fff, 0 0 22px #f0f, 0 0 55px #c0f;
-                                  display: inline-block; transform: skewX(-6deg);
-                                  margin: 0 12px; }
-            #title .word-fps    { font-size: 44px; font-weight: 700; color: #f80;
-                                  text-shadow: 0 0 6px #f80, 0 0 20px #f40;
-                                  display: inline-block; vertical-align: middle;
-                                  border: 3px solid #f80; padding: 2px 10px 2px 10px;
-                                  transform: skewX(-8deg); box-shadow: 0 0 14px #f804; }
-            @keyframes flicker {
-                0%,100%  { opacity: 1; }
-                92%      { opacity: 1; }
-                93%      { opacity: 0.3; }
-                94%      { opacity: 1; }
-                96%      { opacity: 0.5; }
-                97%      { opacity: 1; }
-            }
-            #game-container {
-                position: relative;
-                width: 1600px;
-                height: 800px;
-                margin: 4px auto 0;
-                border: 4px solid #0ff;
-                box-shadow: 0 0 30px #0ff4, 0 0 80px #08f2;
-            }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body { background: #000; overflow: hidden; font-family: "Courier New", Courier, monospace; }
             canvas {
                 display: block;
+                position: fixed;
+                top: 0; left: 0;
+                width: 100vw;
+                height: 100vh;
                 background: #111;
             }
-            #ui {
-                position: absolute;
-                bottom: 10px;
-                left: 10px;
-                color: #0ff;
-                text-shadow: 0 0 5px #0ff;
-            }
             #crosshair {
-                position: absolute;
-                top: 50%;
-                left: 50%;
+                position: fixed;
+                top: 50%; left: 50%;
                 transform: translate(-50%, -50%);
                 color: #0ff;
                 font-weight: bold;
                 pointer-events: none;
+                z-index: 5;
             }
             #sound-toggle, #pause-btn {
-                position: absolute;
+                position: fixed;
                 top: 10px;
                 background: rgba(0,0,0,0.6);
                 border: 1px solid #0cf;
@@ -73,7 +34,6 @@
                 font-size: 14px;
                 width: 90px;
                 height: 28px;
-                box-sizing: border-box;
                 cursor: pointer;
                 user-select: none;
                 letter-spacing: 0.05em;
@@ -87,19 +47,61 @@
             #sound-toggle:hover, #pause-btn:hover { background: rgba(0,200,220,0.15); }
             #sound-toggle.muted { border-color: #555; color: #555; }
             #pause-btn.paused   { border-color: #f80; color: #f80; }
+
+            /* ── Mobile touch controls ── */
+            #mobile-controls { display: none; position: fixed; inset: 0; pointer-events: none; z-index: 20; }
+            .joy-base {
+                position: absolute;
+                width: 120px; height: 120px;
+                border-radius: 50%;
+                background: rgba(0,255,255,0.08);
+                border: 2px solid rgba(0,255,255,0.3);
+                pointer-events: auto;
+                touch-action: none;
+                -webkit-tap-highlight-color: transparent;
+            }
+            .joy-knob {
+                position: absolute;
+                width: 50px; height: 50px;
+                border-radius: 50%;
+                background: rgba(0,200,220,0.45);
+                border: 2px solid #0ff;
+                top: 50%; left: 50%;
+                transform: translate(-50%, -50%);
+                pointer-events: none;
+            }
+            #joy-left  { bottom: 30px; left: 30px; }
+            #joy-right { bottom: 30px; right: 30px; }
+            .mob-btn {
+                position: absolute;
+                border-radius: 50%;
+                background: rgba(255,80,0,0.2);
+                border: 2px solid #f80;
+                color: #f80;
+                font-size: 15px;
+                font-weight: bold;
+                font-family: "Courier New", monospace;
+                display: flex; align-items: center; justify-content: center;
+                pointer-events: auto;
+                touch-action: none;
+                -webkit-tap-highlight-color: transparent;
+                user-select: none;
+            }
+            #fire-btn { width: 80px; height: 80px; bottom: 160px; right: 40px; font-size: 14px; }
+            #aim-btn  { width: 60px; height: 60px; bottom: 160px; right: 140px;
+                        background: rgba(0,200,255,0.15); border-color: #0cf; color: #0cf; font-size: 13px; }
         </style>
     </head>
     <body>
-        <div id="title">
-            <span class="word-neon">NEON</span>
-            <span class="word-breach">BREACH</span>
-            <span class="word-fps">FPS</span>
-        </div>
-        <div id="game-container">
-            <canvas id="canvas" width="1600" height="800"></canvas>
-            <div id="crosshair">+</div>
-            <button id="pause-btn">⏸ PAUSE</button>
-            <button id="sound-toggle">♪ SFX ON</button>
+        <canvas id="canvas" width="1600" height="800"></canvas>
+        <div id="crosshair">+</div>
+        <button id="pause-btn">⏸ PAUSE</button>
+        <button id="sound-toggle">♪ SFX ON</button>
+        <div id="mobile-controls">
+            <div class="joy-base" id="joy-left"><div class="joy-knob" id="joy-left-knob"></div></div>
+            <div class="joy-base" id="joy-right"><div class="joy-knob" id="joy-right-knob"></div></div>
+            <div class="mob-btn" id="fire-btn">FIRE</div>
+            <div class="mob-btn" id="aim-btn">AIM</div>
         </div>
 
         <script>
@@ -142,6 +144,8 @@
             let gameState = 'menu'; // 'menu' | 'playing' | 'dead'
             let menuFrame = 0;
             let mouseX = 800, mouseY = 400;
+            let isMobile = false;
+            const mob = { moveX: 0, moveY: 0, lookX: 0, lookY: 0, firing: false, aiming: false };
             const impacts = [];
 
             const medkits = [];
@@ -948,11 +952,22 @@
 
                 const speed = keys["ShiftLeft"] || keys["ShiftRight"] ? 0.04 : 0.02;
 
+                // Mobile look input
+                if (isMobile) {
+                    player.dir += mob.lookX * 0.05;
+                    player.pitch = Math.max(-300, Math.min(300, player.pitch - mob.lookY * 18));
+                    if (mob.firing && !player.autoFire) {
+                        player.autoFire = true;
+                        if (player.autoFireTimer <= 0) { doShoot(); player.autoFireTimer = 5; }
+                    } else if (!mob.firing) { player.autoFire = false; }
+                    player.isAiming = mob.aiming;
+                }
+
                 let tx = 0, ty = 0;
-                if (keys["KeyW"]) { tx += Math.cos(player.dir) * speed; ty += Math.sin(player.dir) * speed; }
-                if (keys["KeyS"]) { tx -= Math.cos(player.dir) * speed; ty -= Math.sin(player.dir) * speed; }
-                if (keys["KeyA"]) { tx += Math.cos(player.dir - Math.PI/2) * speed; ty += Math.sin(player.dir - Math.PI/2) * speed; }
-                if (keys["KeyD"]) { tx += Math.cos(player.dir + Math.PI/2) * speed; ty += Math.sin(player.dir + Math.PI/2) * speed; }
+                if (keys["KeyW"] || mob.moveY < -0.2) { const f = mob.moveY < -0.2 ? Math.min(1, -mob.moveY) : 1; tx += Math.cos(player.dir) * speed * f; ty += Math.sin(player.dir) * speed * f; }
+                if (keys["KeyS"] || mob.moveY >  0.2) { const f = mob.moveY >  0.2 ? Math.min(1,  mob.moveY) : 1; tx -= Math.cos(player.dir) * speed * f; ty -= Math.sin(player.dir) * speed * f; }
+                if (keys["KeyA"] || mob.moveX < -0.2) { const f = mob.moveX < -0.2 ? Math.min(1, -mob.moveX) : 1; tx += Math.cos(player.dir - Math.PI/2) * speed * f; ty += Math.sin(player.dir - Math.PI/2) * speed * f; }
+                if (keys["KeyD"] || mob.moveX >  0.2) { const f = mob.moveX >  0.2 ? Math.min(1,  mob.moveX) : 1; tx += Math.cos(player.dir + Math.PI/2) * speed * f; ty += Math.sin(player.dir + Math.PI/2) * speed * f; }
 
                 // Smooth velocity
                 player.vx = player.vx * 0.15 + tx * 0.85;
@@ -1397,17 +1412,40 @@
                 for (let gx = offset; gx <= W; gx += 50) { ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke(); }
                 for (let gy = offset; gy <= H; gy += 50) { ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke(); }
 
-                // Header
+                // Header with game title
                 ctx.fillStyle = 'rgba(0,15,30,0.95)';
-                ctx.fillRect(0, 0, W, 80);
+                ctx.fillRect(0, 0, W, 90);
                 ctx.strokeStyle = '#0ff';
                 ctx.lineWidth = 2;
-                ctx.beginPath(); ctx.moveTo(0,80); ctx.lineTo(W,80); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0,90); ctx.lineTo(W,90); ctx.stroke();
 
+                // NEON BREACH FPS title
+                const flicker = (Math.sin(menuFrame * 0.04) > 0.93) ? 0.35 : 1;
                 ctx.textAlign = 'center';
+                // NEON
+                ctx.save();
+                ctx.globalAlpha = flicker;
+                ctx.shadowColor = '#0ff'; ctx.shadowBlur = 28;
+                ctx.font = '900 46px "Courier New"';
+                ctx.fillStyle = '#0ff';
+                ctx.fillText('NEON', W/2 - 260, 62);
+                ctx.restore();
+                // BREACH
+                ctx.save();
+                ctx.shadowColor = '#f0f'; ctx.shadowBlur = 22;
+                ctx.font = '900 58px "Courier New"';
                 ctx.fillStyle = '#fff';
-                ctx.font = '900 48px "Courier New"';
-                ctx.fillText('MISSION BRIEFING', W/2, 55);
+                ctx.fillText('BREACH', W/2, 66);
+                ctx.restore();
+                // FPS
+                ctx.save();
+                ctx.shadowColor = '#f80'; ctx.shadowBlur = 16;
+                ctx.font = '700 36px "Courier New"';
+                ctx.fillStyle = '#f80';
+                ctx.strokeStyle = '#f80'; ctx.lineWidth = 2;
+                ctx.strokeRect(W/2 + 182, 24, 100, 48);
+                ctx.fillText('FPS', W/2 + 232, 58);
+                ctx.restore();
 
                 // Footer
                 const footerY = H - 80;
@@ -1429,7 +1467,7 @@
                 ctx.fillText('INITIALIZE NEURAL LINK', W/2, btnY + 36);
 
                 const colW = (W - 80) / 3;
-                const colY = 90;
+                const colY = 100;
                 const colH = footerY - colY - 10;
 
                 // --- COL 1: SYSTEM ACCESS ---
@@ -2355,6 +2393,75 @@
                     ctx.textAlign = 'left';
                 }
             }
+
+            // ── Mobile touch controls ────────────────────────────────────────
+            window.addEventListener('touchstart', () => {
+                if (isMobile) return;
+                isMobile = true;
+                document.getElementById('mobile-controls').style.display = 'block';
+                document.getElementById('crosshair').style.display = 'none'; // drawn in canvas when aiming
+            }, { once: true });
+
+            function setupJoystick(baseEl, knobEl, onMove) {
+                const R = 60; // max knob travel radius (half of 120px base)
+                let touchId = null, ox = 0, oy = 0;
+                baseEl.addEventListener('touchstart', e => {
+                    e.preventDefault();
+                    if (touchId !== null) return;
+                    const t = e.changedTouches[0];
+                    touchId = t.identifier;
+                    const rect = baseEl.getBoundingClientRect();
+                    ox = rect.left + rect.width / 2;
+                    oy = rect.top  + rect.height / 2;
+                }, { passive: false });
+                baseEl.addEventListener('touchmove', e => {
+                    e.preventDefault();
+                    for (const t of e.changedTouches) {
+                        if (t.identifier !== touchId) continue;
+                        let dx = t.clientX - ox, dy = t.clientY - oy;
+                        const len = Math.sqrt(dx*dx + dy*dy);
+                        if (len > R) { dx = dx/len*R; dy = dy/len*R; }
+                        knobEl.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
+                        onMove(dx / R, dy / R);
+                    }
+                }, { passive: false });
+                const end = e => {
+                    for (const t of e.changedTouches) {
+                        if (t.identifier !== touchId) continue;
+                        touchId = null;
+                        knobEl.style.transform = 'translate(-50%, -50%)';
+                        onMove(0, 0);
+                    }
+                };
+                baseEl.addEventListener('touchend',    end, { passive: false });
+                baseEl.addEventListener('touchcancel', end, { passive: false });
+            }
+
+            setupJoystick(
+                document.getElementById('joy-left'),
+                document.getElementById('joy-left-knob'),
+                (x, y) => { mob.moveX = x; mob.moveY = y; }
+            );
+            setupJoystick(
+                document.getElementById('joy-right'),
+                document.getElementById('joy-right-knob'),
+                (x, y) => { mob.lookX = x; mob.lookY = y; }
+            );
+
+            function setupMobBtn(id, onDown, onUp) {
+                const el = document.getElementById(id);
+                el.addEventListener('touchstart', e => { e.preventDefault(); e.stopPropagation(); onDown(); }, { passive: false });
+                el.addEventListener('touchend',   e => { e.preventDefault(); e.stopPropagation(); onUp();   }, { passive: false });
+                el.addEventListener('touchcancel',e => { e.preventDefault(); e.stopPropagation(); onUp();   }, { passive: false });
+            }
+            setupMobBtn('fire-btn',
+                () => { mob.firing = true;  if (gameState === 'menu') respawn(); },
+                () => { mob.firing = false; }
+            );
+            setupMobBtn('aim-btn',
+                () => { mob.aiming = true; },
+                () => { mob.aiming = false; }
+            );
 
             function loop() {
                 update();
